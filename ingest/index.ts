@@ -1,5 +1,4 @@
 import 'dotenv/config'
-import { createRequire } from 'node:module'
 import { createServer } from 'http'
 import { WebSocketServer, WebSocket } from 'ws'
 import { PublicKey, type Connection } from '@solana/web3.js'
@@ -7,9 +6,8 @@ import type { PullEvent } from '../lib/types'
 import { solUsd, usdFromSol } from '../lib/price'
 import { tokenName } from '../lib/token-name'
 import { watchSentOn } from './sent-on'
+import type { GrpcStream } from 'solami'
 import { LP_PROGRAMS, parseRpcRemove, parseYellowstoneRemove, type RemoveHit } from './remove'
-
-const nodeRequire = createRequire(import.meta.url)
 
 const PORT = Number(process.env.DRAIN_WS_PORT || 8787)
 const MIN_SOL = Number(process.env.DRAIN_MIN_SOL || 1)
@@ -77,8 +75,7 @@ async function emitRemove(hit: RemoveHit) {
   )
 
   if (!connection) return
-  const rpc = connection
-  watchSentOn(rpc, hit.puller, hit.signature, SENT_MS)
+  watchSentOn(connection, hit.puller, hit.signature, SENT_MS)
     .then((hop) => {
       if (!hop) return
       broadcast({
@@ -93,21 +90,7 @@ async function emitRemove(hit: RemoveHit) {
 }
 
 let connection: Connection | null = null
-let request: Record<string, unknown> | null = null
-
-class StreamDenied extends Error {}
-
-function yellowstoneClient(url: string) {
-  const fromSolami = createRequire(nodeRequire.resolve('solami'))
-  const loaded = fromSolami('@triton-one/yellowstone-grpc') as { default?: new (url: string, token: string, options: undefined) => { _client: { subscribe: (metadata: unknown) => WebSocket & { write: Function; on: Function; destroy: () => void } } } }
-  const Yellowstone = loaded.default ?? (loaded as unknown as new (url: string, token: string, options: undefined) => { _client: { subscribe: (metadata: unknown) => { write: (payload: unknown, cb: (err?: Error | null) => void) => void; on: Function; destroy: () => void } } })
-  const entry = fromSolami.resolve('@triton-one/yellowstone-grpc')
-  const grpc = createRequire(entry)('@grpc/grpc-js') as { Metadata: new () => { add: (key: string, value: string) => void; get: (key: string) => string[] } }
-  const client = new Yellowstone(url, GRPC_TOKEN, undefined)
-  const metadata = new grpc.Metadata()
-  metadata.add('x-token', GRPC_TOKEN)
-  return { stream: client._client.subscribe(metadata), metadata }
-}
+let grpcStream: GrpcStream | null = null
 
 function noteHit(hit: RemoveHit | null) {
   if (!hit || seen.has(hit.signature)) return
@@ -115,36 +98,39 @@ function noteHit(hit: RemoveHit | null) {
   void emitRemove(hit).catch((err) => console.error('emit failed', scrub(err)))
 }
 
-async function openGrpc(url: string) {
-  const { CommitmentLevel, SubscriptionBuilder } = await import('solami')
-  if (!request) {
-    request = new SubscriptionBuilder()
-      .commitment(CommitmentLevel.CONFIRMED)
-      .transactions('lp-removes', {
-        vote: false,
-        failed: false,
-        accountInclude: LP_PROGRAMS,
-        accountExclude: [],
-        accountRequired: [],
-      })
-      .build()
+async function openGrpcStream(client: {
+  grpc: () => {
+    url: string
+    subscribe: (request: object) => Promise<GrpcStream>
   }
-  const subscribeRequest = request
-  const { stream } = yellowstoneClient(url)
-  console.log(`solami grpc ${url} filtered tx subscribe (solami@0.1.56 has no Blur method)`)
+}) {
+  const { CommitmentLevel, SubscriptionBuilder } = await import('solami')
+  const request = new SubscriptionBuilder()
+    .commitment(CommitmentLevel.CONFIRMED)
+    .transactions('lp-removes', {
+      vote: false,
+      failed: false,
+      accountInclude: LP_PROGRAMS,
+      accountExclude: [],
+      accountRequired: [],
+    })
+    .build()
+  const grpc = client.grpc()
+  console.log(
+    `solami grpc ${grpc.url} client.grpc().subscribe lp-removes (${LP_PROGRAMS.length} LP programs). solami@0.1.56 has no Blur method`,
+  )
   let txs = 0
-  await new Promise<void>((resolve, reject) => {
+  const stream = await grpc.subscribe(request)
+  grpcStream = stream
+  await new Promise<void>((_resolve, reject) => {
     let settled = false
     let denied = ''
     const fail = (err: unknown) => {
       if (settled) return
       settled = true
-      stream.destroy()
-      if (denied) reject(new StreamDenied(denied))
+      grpcStream?.destroy()
+      if (denied) reject(new Error(denied))
       else reject(err instanceof Error ? err : new Error(scrub(err)))
-    }
-    const writeErr = (err?: Error | null) => {
-      if (err) fail(err)
     }
     const capture = (md?: { get: (key: string) => string[] }) => {
       const raw = md?.get('grpc-message')?.[0]
@@ -152,24 +138,22 @@ async function openGrpc(url: string) {
       denied = decodeURIComponent(raw.replace(/\+/g, ' '))
     }
     stream.on('metadata', capture)
-    stream.write({ ...subscribeRequest, ping: undefined }, writeErr)
     stream.on('data', (msg: {
-      ping?: unknown
-      transaction?: { transaction?: unknown; slot?: string }
+      ping?: { id?: number }
+      transaction?: {
+        transaction?: Parameters<typeof parseYellowstoneRemove>[0]
+        slot?: string
+      }
     }) => {
       if (msg.ping && !msg.transaction) {
-        stream.write({ ...subscribeRequest, ping: { id: 1 } }, () => {})
+        stream.write({ ...request, ping: { id: msg.ping.id ?? 1 } }, () => {})
         return
       }
       const info = msg.transaction?.transaction
       if (!info) return
       txs += 1
       if (txs === 1 || txs % 500 === 0) console.log(`stream txs ${txs}`)
-      noteHit(parseYellowstoneRemove(
-        info as Parameters<typeof parseYellowstoneRemove>[0],
-        msg.transaction?.slot ?? 0,
-        MIN_SOL,
-      ))
+      noteHit(parseYellowstoneRemove(info, msg.transaction?.slot ?? 0, MIN_SOL))
     })
     stream.on('status', (status: { metadata?: { get: (key: string) => string[] } }) => {
       capture(status.metadata)
@@ -186,7 +170,7 @@ async function openGrpc(url: string) {
 async function tailRpc() {
   const rpc = connection
   if (!rpc) throw new Error('Solami RPC is not connected')
-  console.log('gRPC streaming is not enabled for this key; watching LP programs on Solami RPC')
+  console.log('gRPC streaming not available for this key; watching LP programs on Solami RPC')
   let cursor = 0
   let scannedCount = 0
   for (;;) {
@@ -194,9 +178,10 @@ async function tailRpc() {
     cursor += 1
     try {
       const sigs = await rpc.getSignaturesForAddress(new PublicKey(program), { limit: 8 }, 'confirmed')
-      const fresh = sigs.filter((info) => !info.err && !scanned.has(info.signature)).slice(0, 4)
+      const fresh = sigs
+        .filter((info) => !info.err && !seen.has(info.signature) && !scanned.has(info.signature))
+        .slice(0, 4)
       for (const info of fresh) {
-        if (scanned.has(info.signature)) continue
         remember(info.signature, scanned)
         try {
           const tx = await rpc.getTransaction(info.signature, {
@@ -232,19 +217,17 @@ async function listenForever() {
   if (process.env.SOLAMI_GRPC_URL) chain = chain.grpcUrl(process.env.SOLAMI_GRPC_URL)
   const client = await chain.build()
   connection = client.rpc().connection
-  const url = client.grpc().url
   try {
-    await openGrpc(url)
+    await openGrpcStream(client)
   } catch (err) {
     const text = scrub(err)
-    if (err instanceof StreamDenied || /plan|gRPC access|permission|denied/i.test(text)) {
+    if (/plan|gRPC access|permission|denied/i.test(text)) {
       console.error(text)
       await tailRpc()
       return
     }
     console.error('stream error', text)
-    await new Promise((r) => setTimeout(r, 2000))
-    await listenForever()
+    await tailRpc()
   }
 }
 

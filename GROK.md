@@ -25,14 +25,13 @@ pnpm dev       # terminal 2 — http://localhost:3000
 Board reads `NEXT_PUBLIC_DRAIN_WS`.
 
 ## Where live numbers come from
-1. Solami gRPC Blur `liquidity` remove (preferred) or parsed tx token-balance delta for WSOL
+1. `solami@0.1.56` has no Blur method. One `client.grpc().subscribe` filtered to the LP programs. If that key cannot stream, poll those programs with Solami RPC and a WSOL balance delta. Min SOL = `DRAIN_MIN_SOL`.
 2. `lib/price.ts` Jupiter SOL/USD
 3. `lib/token-name.ts` Dexscreener symbol/name
-4. Solami RPC `getSignaturesForAddress` + parsed tx on the puller for sent-on
+4. Solami RPC `getSignaturesForAddress` + `getTransaction` preBalances/postBalances on the puller for sent-on
 
 ## Files to finish first if stream fails
-- `ingest/index.ts` — match whatever methods the installed `solami` npm package actually exports (`subscribeBlur`, `subscribe_blur_events`, or raw Yellowstone). Inspect `node_modules/solami` before guessing.
-- Filter event type to liquidity **remove** only. Min SOL = `DRAIN_MIN_SOL`.
+- `ingest/index.ts` — keep the one subscribe attempt, then the RPC poll. Do not look for a Blur subscribe. Do not subscribe unfiltered.
 
 ## UI leftovers
 - No `↗` on links
