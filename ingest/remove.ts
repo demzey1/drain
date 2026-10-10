@@ -57,11 +57,11 @@ export type RemoveHit = {
 type Agg = { raw: bigint; decimals: number }
 
 function lamports(value: string | number | undefined): bigint {
-  if (value == null || value === '') return 0n
+  if (value == null || value === '') return BigInt(0)
   try {
     return BigInt(value)
   } catch {
-    return 0n
+    return BigInt(0)
   }
 }
 
@@ -80,8 +80,10 @@ function dexFor(keys: string[]): string {
 }
 
 /**
- * A remove pays the puller SOL (WSOL and/or native) and the other pool token.
- * A swap moves only one side to the user, so it does not match.
+ * A remove is the signer taking both sides out of a pool.
+ * The signer must gain WSOL (or native SOL) and the other token.
+ * A different owner must have lost both. An add or Invest sends both
+ * into the pool, so the signer is not the receiver and does not match.
  */
 export function parseRemove(input: {
   signature: string
@@ -95,23 +97,12 @@ export function parseRemove(input: {
   minSol: number
 }): RemoveHit | null {
   if (input.failed || !input.signature) return null
+  const signer = input.keys[0]
+  if (!signer) return null
   const minRaw = BigInt(Math.round(input.minSol * LAMPORTS_PER_SOL))
-  if (minRaw <= 0n) return null
+  if (minRaw <= BigInt(0)) return null
 
   const byMintOwner = new Map<string, Map<string, Agg>>()
-  const touch = (row: TokenRow, sign: 1 | -1) => {
-    if (!row.mint || !row.owner) return
-    let owners = byMintOwner.get(row.mint)
-    if (!owners) {
-      owners = new Map()
-      byMintOwner.set(row.mint, owners)
-    }
-    const prev = owners.get(row.owner) ?? { raw: 0n, decimals: row.decimals }
-    prev.raw += BigInt(sign) * lamports(row.amount)
-    prev.decimals = row.decimals
-    owners.set(row.owner, prev)
-  }
-
   const preByIndex = new Map(input.preToken.map((row) => [row.accountIndex, row]))
   const postByIndex = new Map(input.postToken.map((row) => [row.accountIndex, row]))
   const indexes = new Set<number>([...preByIndex.keys(), ...postByIndex.keys()])
@@ -121,77 +112,62 @@ export function parseRemove(input: {
     const mint = post?.mint || pre?.mint || ''
     const owner = post?.owner || pre?.owner || ''
     const decimals = post?.decimals ?? pre?.decimals ?? 0
-    const before = pre ? lamports(pre.amount) : 0n
-    const after = post ? lamports(post.amount) : 0n
+    const before = pre ? lamports(pre.amount) : BigInt(0)
+    const after = post ? lamports(post.amount) : BigInt(0)
     const delta = after - before
-    if (!mint || !owner || delta === 0n) continue
-    touch(
-      { accountIndex: index, mint, owner, amount: (delta < 0n ? -delta : delta).toString(), decimals },
-      delta > 0n ? 1 : -1,
-    )
-  }
-
-  const othersLost = (mint: string, owner: string): boolean => {
-    const owners = byMintOwner.get(mint)
-    if (!owners) return false
-    for (const [who, agg] of owners) {
-      if (who !== owner && agg.raw < 0n) return true
+    if (!mint || !owner || delta === BigInt(0)) continue
+    let owners = byMintOwner.get(mint)
+    if (!owners) {
+      owners = new Map()
+      byMintOwner.set(mint, owners)
     }
-    return false
+    const prev = owners.get(owner) ?? { raw: BigInt(0), decimals }
+    prev.raw += delta
+    prev.decimals = decimals
+    owners.set(owner, prev)
   }
 
   const wsolOwners = byMintOwner.get(WSOL)
-  let poolWsolLoss = 0n
-  if (wsolOwners) {
-    for (const agg of wsolOwners.values()) {
-      if (agg.raw < 0n) poolWsolLoss += -agg.raw
-    }
-  }
-  if (poolWsolLoss < minRaw) return null
+  const signerIndex = 0
+  const nativeDelta =
+    lamports(input.postBalances[signerIndex]) - lamports(input.preBalances[signerIndex])
+  const nativeGain = nativeDelta > BigInt(0) ? nativeDelta : BigInt(0)
+  const signerWsol = wsolOwners?.get(signer)
+  const wsolGain = signerWsol && signerWsol.raw > BigInt(0) ? signerWsol.raw : BigInt(0)
+  const solRaw = wsolGain + nativeGain
+  if (solRaw < minRaw) return null
 
-  const nativeGain = (owner: string): bigint => {
-    const index = input.keys.indexOf(owner)
-    if (index < 0) return 0n
-    const delta = lamports(input.postBalances[index]) - lamports(input.preBalances[index])
-    return delta > 0n ? delta : 0n
-  }
-
-  let best: { owner: string; solRaw: bigint; mint: string; mintUi: number } | null = null
-  const owners = new Set<string>(input.keys[0] ? [input.keys[0]] : [])
-  for (const ownersOfMint of byMintOwner.values()) {
-    for (const owner of ownersOfMint.keys()) owners.add(owner)
-  }
-
-  for (const owner of owners) {
-    const wsolGain = wsolOwners?.get(owner)
-    const wsolRaw = wsolGain && wsolGain.raw > 0n ? wsolGain.raw : 0n
-    const solRaw = wsolRaw + nativeGain(owner)
-    if (solRaw < minRaw) continue
-    let mint = ''
-    let mintUi = 0
-    for (const [candidate, ownersOfMint] of byMintOwner) {
-      if (candidate === WSOL) continue
-      const gain = ownersOfMint.get(owner)
-      if (!gain || gain.raw <= 0n) continue
-      if (!othersLost(candidate, owner)) continue
-      const human = ui(gain)
-      if (!mint || human > mintUi) {
-        mint = candidate
-        mintUi = human
+  let mint = ''
+  let mintUi = 0
+  for (const [candidate, ownersOfMint] of byMintOwner) {
+    if (candidate === WSOL) continue
+    const gain = ownersOfMint.get(signer)
+    if (!gain || gain.raw <= BigInt(0)) continue
+    let poolLostBoth = false
+    for (const [owner, agg] of ownersOfMint) {
+      if (owner === signer || agg.raw >= BigInt(0)) continue
+      const wsol = wsolOwners?.get(owner)
+      if (wsol && wsol.raw < BigInt(0)) {
+        poolLostBoth = true
+        break
       }
     }
-    if (!mint) continue
-    if (!best || solRaw > best.solRaw) best = { owner, solRaw, mint, mintUi }
+    if (!poolLostBoth) continue
+    const human = ui(gain)
+    if (!mint || human > mintUi) {
+      mint = candidate
+      mintUi = human
+    }
   }
+  if (!mint) return null
 
-  if (!best) return null
   return {
-    mint: best.mint,
-    puller: best.owner,
+    mint,
+    puller: signer,
     signature: input.signature,
     slot: input.slot,
     dex: dexFor(input.keys),
-    amountSol: Number(best.solRaw) / LAMPORTS_PER_SOL,
+    amountSol: Number(solRaw) / LAMPORTS_PER_SOL,
   }
 }
 

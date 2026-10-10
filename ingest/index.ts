@@ -101,7 +101,7 @@ function noteHit(hit: RemoveHit | null) {
 async function openGrpcStream(client: {
   grpc: () => {
     url: string
-    subscribe: (request: object) => Promise<GrpcStream>
+    subscribe: (request: any) => Promise<GrpcStream>
   }
 }) {
   const { CommitmentLevel, SubscriptionBuilder } = await import('solami')
@@ -167,10 +167,44 @@ async function openGrpcStream(client: {
   })
 }
 
+async function backfill() {
+  const rpc = connection
+  if (!rpc) return
+  let found = 0
+  for (const program of LP_PROGRAMS) {
+    try {
+      const sigs = await rpc.getSignaturesForAddress(new PublicKey(program), { limit: 40 }, 'confirmed')
+      for (const info of sigs) {
+        if (info.err || seen.has(info.signature) || scanned.has(info.signature)) continue
+        remember(info.signature, scanned)
+        try {
+          const tx = await rpc.getTransaction(info.signature, {
+            maxSupportedTransactionVersion: 1,
+            commitment: 'confirmed',
+          })
+          if (!tx) continue
+          const hit = parseRpcRemove(tx as Parameters<typeof parseRpcRemove>[0], info.signature, MIN_SOL)
+          if (hit) {
+            found += 1
+            noteHit(hit)
+          }
+        } catch (err) {
+          console.error('backfill skip', scrub(err).slice(0, 160))
+        }
+        await new Promise((r) => setTimeout(r, 200))
+      }
+    } catch (err) {
+      console.error('backfill', scrub(err).slice(0, 180))
+    }
+  }
+  console.log(`backfill ${found} pulls`)
+}
+
 async function tailRpc() {
   const rpc = connection
   if (!rpc) throw new Error('Solami RPC is not connected')
   console.log('gRPC streaming not available for this key; watching LP programs on Solami RPC')
+  await backfill()
   let cursor = 0
   let scannedCount = 0
   for (;;) {
@@ -193,7 +227,7 @@ async function tailRpc() {
             continue
           }
           scannedCount += 1
-          noteHit(parseRpcRemove(tx, info.signature, MIN_SOL))
+          noteHit(parseRpcRemove(tx as Parameters<typeof parseRpcRemove>[0], info.signature, MIN_SOL))
         } catch (err) {
           const text = scrub(err)
           if (/429|Too Many Requests/i.test(text)) throw err
