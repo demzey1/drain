@@ -28,6 +28,9 @@ h1 em { color: var(--rust); font-style: italic; }
 .hero-copy { max-width: 510px; color: #b6b0a7; font-size: 16px; line-height: 1.55; margin: 34px 0 31px; }
 .button-primary { display: inline-flex; gap: 34px; align-items: center; background: var(--rust); color: #160b05; padding: 14px 17px; font: 12px 'IBM Plex Mono', monospace; border: 1px solid var(--rust); }
 .button-primary:hover { background: #f3741a; }
+.hero-key { margin: 14px 0 0; font: 12px 'IBM Plex Mono', monospace; }
+.hero-key a { color: var(--muted); text-decoration: underline; text-underline-offset: 3px; }
+.hero-key a:hover { color: var(--bone); }
 .steps { border-top: 1px solid var(--line); padding: 24px 0 138px; }
 .section-heading { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-bottom: 50px; }
 .steps-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 48px; }

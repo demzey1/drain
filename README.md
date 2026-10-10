@@ -29,7 +29,7 @@ Terminal 2:
 npx next dev
 ```
 
-Open http://localhost:3000/board.
+Open http://localhost:3000 then Open the board.
 
 An empty board (`waiting for a pull`) is correct until a real remove lands.
 

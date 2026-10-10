@@ -23,6 +23,7 @@ export default function LandingPage() {
         <h1>See who <em>emptied</em> the pool.</h1>
         <p className="hero-copy">Live liquidity pool removals on Solana. Who pulled the LP, how much, whether they already sent the SOL on.</p>
         <Link className="button-primary" href="/board">Open the board</Link>
+        <p className="hero-key"><a href="https://github.com/demzey1/drain">Run it with your own Solami key.</a></p>
       </section>
 
       <section id="how-it-works" className="steps landing-container">
