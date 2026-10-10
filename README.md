@@ -16,10 +16,12 @@ In the Solami dashboard, open API Keys. Copy the RPC key into `SOLAMI_RPC_TOKEN`
 
 ## Setup
 
+```bash
 git clone https://github.com/demzey1/drain.git
 cd drain
 npm install
 copy .env.example .env.local
+```
 
 On Mac or Linux use `cp .env.example .env.local` instead of `copy`.
 
@@ -29,13 +31,18 @@ Paste your two keys into `.env.local`. Leave `DRAIN_PREVIEW` empty. Do not commi
 
 Terminal 1:
 
+```bash
 npx tsx --env-file=.env.local ingest/index.ts
+```
 
 Terminal 2:
 
+```bash
 npx next dev
+```
 
 Open http://localhost:3000
+
 Then click Open the board.
 
 An empty board that says waiting for a pull is correct until a real remove lands.
